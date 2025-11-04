@@ -17,6 +17,6 @@ ollama:
   llm_model: ${OLLAMA_LLM}
 
 params:
-  chunk_size: 800
+  chunk_size: 500
   overlap: 100
   top_k: 4

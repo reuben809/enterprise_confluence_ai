@@ -122,6 +122,13 @@ def crawl():
             continue
         seen.add(pid)
 
+        # --- NEW CODE FOR DEMO LIMIT ---
+        # Stop the crawl after 10 pages for a quick demo
+        if len(seen) > 10:
+            logging.info("Demo page limit (10) reached. Stopping crawl.")
+            break
+        # --- END OF NEW CODE ---
+
         page_url = f"{BASE}/rest/api/content/{pid}?expand=body.storage,version"
         r = safe_request(page_url)
         if not r or not r.ok:
