@@ -13,8 +13,8 @@ OLLAMA_LLM = os.getenv("OLLAMA_LLM")
 EMBED_MODEL = os.getenv("EMBED_MODEL")
 TOP_K = int(os.getenv("TOP_K", 4))
 MONGO_URI_HOST = "mongodb://localhost:27017/"
-QDRANT_URL_HOST = "http://localhost:6333"
-OLLAMA_URL_HOST = "http://localhost:11434"
+QDRANT_URL_HOST = "http://[::1]:6333"  # Use IPv6 for Qdrant
+OLLAMA_URL_HOST = "http://[::1]:11434"  # Use IPv6 for Ollama
 
 # --- Connect to Services ---
 try:
@@ -51,7 +51,7 @@ def call_ollama(prompt: str):
         payload = {
             "model": OLLAMA_LLM,
             "prompt": prompt,
-            "stream": True  # Enable streaming
+            "stream": True
         }
         with requests.post(f"{OLLAMA_URL_HOST}/api/generate", json=payload, stream=True, timeout=120) as resp:
             resp.raise_for_status()
@@ -91,23 +91,30 @@ def main():
             chat_history.append({"role": "user", "content": question})
 
             # 1. Embed query
-            print("Embedding query...", file=sys.stderr)  # Added debug print
+            print("Embedding query...", file=sys.stderr)
             query_vector = embed_query(question)
             if query_vector is None:
                 continue
 
             # 2. Search top-K chunks
-            print("Searching context...", file=sys.stderr)  # Added debug print
+            print("Searching context...", file=sys.stderr)
+
+            # --- REVERTED TO .search() ---
+            # This works. We will ignore the DeprecationWarning.
             results = qdrant.search(
                 collection_name="confluence_vectors",
                 query_vector=query_vector,
                 limit=TOP_K,
+                with_payload=True
             )
+            # -----------------------------
 
             # 3. Build context and sources
-            formatted_context = ""
+            formatted_context = ""  # Typo fixed here
             sources = []
             seen_urls = set()
+
+            # Loop over results directly (not results.points)
             for r in results:
                 meta = r.payload
                 formatted_context += f"- **{meta['title']}** ({meta['url']})\n\n{meta['chunk']}\n\n"
@@ -125,12 +132,12 @@ def main():
             # 4. Build prompt
             prompt = CHAT_SYSTEM_PROMPT_TEMPLATE.format(
                 formatted_context_with_sources=formatted_context.strip(),
-                formatted_chat_history=format_chat_history(chat_history[:-1]),  # History *before* this question
+                formatted_chat_history=format_chat_history(chat_history[:-1]),
                 user_query=question
             )
 
             # 5. Generate and stream answer
-            print("Generating answer...", file=sys.stderr)  # Added debug print
+            print("Generating answer...", file=sys.stderr)
             print("\n🤖 Assistant: ", end="", flush=True)
             full_response = ""
             for token in call_ollama(prompt):
