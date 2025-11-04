@@ -1,0 +1,22 @@
+confluence:
+  base_url: ${BASE_URL}
+  space_key: ${SPACE_KEY}
+  pat: ${PAT}
+
+mongo:
+  uri: ${MONGO_URI}
+  db: ${MONGO_DB}
+  collection: pages
+
+qdrant:
+  url: ${QDRANT_URL}
+  collection: confluence_vectors
+
+ollama:
+  embed_model: ${EMBED_MODEL}
+  llm_model: ${OLLAMA_LLM}
+
+params:
+  chunk_size: 800
+  overlap: 100
+  top_k: 4
