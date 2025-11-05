@@ -22,6 +22,7 @@ services:
     restart: unless-stopped
     ports: ["11434:11434"]
     command: serve
+    # 👇 THIS IS THE LINE THAT PROTECTS YOUR MODELS 👇
     volumes: [ "ollama:/root/.ollama" ]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags" ]
@@ -43,6 +44,15 @@ services:
     volumes: [".:/app"]
     ports: ["8000:8000"]
     command: ["uvicorn", "chat.chat_api:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+  streamlit-ui:
+    build: .
+    depends_on:
+      - rag-api
+    env_file: .env
+    volumes: [".:/app"]
+    ports: ["8501:8501"]
+    command: ["streamlit", "run", "streamlit_app.py", "--server.port", "8501", "--server.address", "0.0.0.0"]
 
 volumes:
   mongo_data:
