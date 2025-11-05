@@ -9,3 +9,8 @@ python-dotenv
 pyyaml
 streamlit
 httpx
+lxml
+langchain
+langchain-community
+langchain-text-splitters
+ollama
