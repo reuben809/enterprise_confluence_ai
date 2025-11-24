@@ -1,12 +1,9 @@
-import os
 from qdrant_client import QdrantClient
-from dotenv import load_dotenv
 
-load_dotenv()
+from config.settings import settings
 
-# Use the IPv6 address to be consistent
-QDRANT_URL_HOST = "http://[::1]:6333"
-COLLECTION_NAME = "confluence_vectors"  # From ingestion/embedder.py
+QDRANT_URL_HOST = settings.qdrant_url
+COLLECTION_NAME = settings.qdrant_collection
 
 try:
     client = QdrantClient(url=QDRANT_URL_HOST)

@@ -4,15 +4,17 @@ from collections import deque
 from bs4 import BeautifulSoup
 from pymongo import MongoClient
 import requests
-from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
-BASE = os.getenv("BASE_URL").rstrip("/")
-SPACE = os.getenv("SPACE_KEY")
-PAT = os.getenv("PAT")
-MONGO_URI = os.getenv("MONGO_URI")
-MONGO_DB = os.getenv("MONGO_DB")
+from config.settings import settings
+
+BASE = (settings.base_url or "").rstrip("/")
+SPACE = settings.space_key
+PAT = settings.pat
+MONGO_URI = settings.mongo_uri
+MONGO_DB = settings.mongo_db
+
+if not BASE or not SPACE or not PAT:
+    raise RuntimeError("BASE_URL, SPACE_KEY, and PAT must be configured in the environment or .env file.")
 
 # Setup logging
 logging.basicConfig(

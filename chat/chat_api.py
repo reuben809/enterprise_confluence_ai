@@ -1,119 +1,26 @@
-# from fastapi import FastAPI
-# from pydantic import BaseModel
-# from qdrant_client import QdrantClient
-# from pymongo import MongoClient
-# import requests, os, json
-# from dotenv import load_dotenv
-# from .prompt_template import STRICT_SYSTEM_PROMPT
-#
-# load_dotenv()
-#
-# MONGO_URI = os.getenv("MONGO_URI")
-# MONGO_DB = os.getenv("MONGO_DB")
-# QDRANT_URL = os.getenv("QDRANT_URL")
-# OLLAMA_LLM = os.getenv("OLLAMA_LLM")
-# TOP_K = int(os.getenv("TOP_K", 4))
-#
-# # Connect to MongoDB & Qdrant
-# mongo_client = MongoClient(MONGO_URI)
-# mongo_db = mongo_client[MONGO_DB]
-# pages_collection = mongo_db["pages"]
-# qdrant = QdrantClient(url=QDRANT_URL)
-#
-# app = FastAPI(title="Enterprise Confluence Chat API")
-#
-# class Query(BaseModel):
-#     question: str
-#
-# def embed_query(text: str):
-#     """Generate embedding for a query using Ollama."""
-#     resp = requests.post(
-#         "http://ollama:11434/api/embeddings",
-#         json={"model": os.getenv("EMBED_MODEL"), "prompt": text},
-#         timeout=60,
-#     )
-#     resp.raise_for_status()
-#     return resp.json()["embedding"]
-#
-# def call_ollama(prompt: str):
-#     """Call Ollama LLM (Mistral-7B) with strict system prompt."""
-#     payload = {
-#         "model": OLLAMA_LLM,
-#         "prompt": prompt,
-#         "stream": False
-#     }
-#     resp = requests.post("http://ollama:11434/api/generate", json=payload, timeout=120)
-#     resp.raise_for_status()
-#     data = resp.json()
-#     return data.get("response", "").strip()
-#
-# @app.post("/ask")
-# def ask(q: Query):
-#     # 1️⃣ Embed query
-#     query_vector = embed_query(q.question)
-#
-#     # 2️⃣ Search top-K chunks in Qdrant
-#     results = qdrant.search(
-#         collection_name="confluence_vectors",
-#         query_vector=query_vector,
-#         limit=TOP_K,
-#     )
-#
-#     # 3️⃣ Build formatted context
-#     formatted_context = ""
-#     for r in results:
-#         meta = r.payload
-#         formatted_context += f"- **{meta['title']}** ({meta['url']})\n\n{meta['chunk']}\n\n"
-#
-#     if not formatted_context.strip():
-#         return {"answer": "I don't have enough information in the provided documentation to answer that question.", "sources": []}
-#
-#     # 4️⃣ Build strict prompt
-#     prompt = STRICT_SYSTEM_PROMPT.format(
-#         formatted_context_with_sources=formatted_context.strip(),
-#         user_query=q.question
-#     )
-#
-#     # 5️⃣ Generate LLM answer
-#     answer = call_ollama(prompt)
-#
-#     # 6️⃣ Extract sources for transparency
-#     sources = []
-#     for r in results:
-#         meta = r.payload
-#         sources.append({"title": meta["title"], "url": meta["url"]})
-#
-#     return {
-#         "answer": answer,
-#         "sources": sources
-#     }
-#
-# @app.get("/")
-# def root():
-#     return {"message": "Confluence RAG Chat API is running"}
-
-
 import asyncio
-from fastapi import FastAPI, Request
+import json
+from contextlib import asynccontextmanager
+from typing import Any, AsyncGenerator, Dict, List
+
+import httpx
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from qdrant_client import QdrantClient
 from pymongo import MongoClient
-import httpx, os, json
-from dotenv import load_dotenv
+from qdrant_client import QdrantClient
+
+from config.settings import settings
+from retrieval import HybridRetriever, Reranker, SelfRagFilter
 from .prompt_template import CHAT_SYSTEM_PROMPT_TEMPLATE
-from typing import List, Dict, Any, AsyncGenerator
-from contextlib import asynccontextmanager
 
-load_dotenv()
-
-MONGO_URI = os.getenv("MONGO_URI")
-MONGO_DB = os.getenv("MONGO_DB")
-QDRANT_URL = os.getenv("QDRANT_URL")
-OLLAMA_LLM = os.getenv("OLLAMA_LLM")
-EMBED_MODEL = os.getenv("EMBED_MODEL")
-TOP_K = int(os.getenv("TOP_K", 4))
-OLLAMA_BASE_URL = "http://ollama:11434"
+MONGO_URI = settings.mongo_uri
+MONGO_DB = settings.mongo_db
+QDRANT_URL = settings.qdrant_url
+OLLAMA_LLM = settings.ollama_llm
+EMBED_MODEL = settings.embed_model
+TOP_K = settings.top_k
+OLLAMA_BASE_URL = settings.ollama_base_url
 
 # --- Database Clients ---
 mongo_client = MongoClient(MONGO_URI)
@@ -121,6 +28,9 @@ mongo_db = mongo_client[MONGO_DB]
 pages_collection = mongo_db["pages"]
 feedback_collection = mongo_db["feedback"]
 qdrant = QdrantClient(url=QDRANT_URL)
+retriever = HybridRetriever(qdrant, settings.qdrant_collection)
+reranker = Reranker(OLLAMA_BASE_URL, settings.reranker_model or OLLAMA_LLM)
+self_rag_filter = SelfRagFilter(OLLAMA_BASE_URL, OLLAMA_LLM)
 
 
 # --- App Lifespan for HTTPX Client ---
@@ -202,6 +112,34 @@ def format_chat_history(messages: List[Message]):
     return history.strip()
 
 
+def build_context_and_sources(candidates: List[dict]):
+    formatted_context = ""
+    sources: List[Dict[str, Any]] = []
+    seen_parents = set()
+    seen_urls = set()
+
+    for candidate in candidates:
+        payload = candidate["payload"]
+        parent_key = f"{payload.get('page_id')}:{payload.get('parent_index')}"
+        if parent_key in seen_parents:
+            continue
+        parent_text = payload.get("parent_text") or payload.get("chunk") or ""
+        formatted_context += (
+            f"- **{payload['title']}** ({payload['url']})\n\n{parent_text}\n\n"
+        )
+        seen_parents.add(parent_key)
+
+        url = payload.get("url")
+        if url and url not in seen_urls:
+            sources.append({"title": payload.get("title"), "url": url})
+            seen_urls.add(url)
+
+        if len(seen_parents) >= TOP_K:
+            break
+
+    return formatted_context.strip() or "No relevant context found.", sources
+
+
 # --- API Endpoints ---
 
 @app.get("/")
@@ -227,26 +165,19 @@ async def chat(q: ChatQuery, request: Request):
 
         return StreamingResponse(error_stream(), media_type="text/event-stream")
 
-    # 2️⃣ Search top-K chunks in Qdrant (this is still synchronous)
-    results = qdrant.search(
-        collection_name="confluence_vectors",
-        query_vector=query_vector,
-        limit=TOP_K,
+    # 2️⃣ Hybrid search + rerank + self-RAG filtering
+    hybrid_candidates = retriever.hybrid_search(
+        q.question, query_vector, limit=TOP_K * 3
+    )
+    reranked = await asyncio.to_thread(
+        reranker.rerank, q.question, hybrid_candidates, TOP_K * 2
+    )
+    filtered = await asyncio.to_thread(
+        self_rag_filter.filter, q.question, reranked
     )
 
     # 3️⃣ Build context and extract sources
-    formatted_context = ""
-    sources = []
-    seen_urls = set()
-    for r in results:
-        meta = r.payload
-        formatted_context += f"- **{meta['title']}** ({meta['url']})\n\n{meta['chunk']}\n\n"
-        if meta['url'] not in seen_urls:
-            sources.append({"title": meta["title"], "url": meta["url"]})
-            seen_urls.add(meta['url'])
-
-    if not formatted_context.strip():
-        formatted_context = "No relevant context found."
+    formatted_context, sources = build_context_and_sources(filtered)
 
     # 4️⃣ Build prompt
     prompt = CHAT_SYSTEM_PROMPT_TEMPLATE.format(
@@ -279,4 +210,4 @@ def feedback(f: Feedback):
         feedback_collection.insert_one(f.dict())
         return {"status": "success", "message": "Feedback received"}
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        raise HTTPException(status_code=500, detail=str(e)) from e
