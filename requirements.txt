@@ -14,3 +14,4 @@ langchain
 langchain-community
 langchain-text-splitters
 ollama
+rank-bm25
