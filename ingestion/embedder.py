@@ -1,86 +1,42 @@
-# import os, logging
-# from qdrant_client import QdrantClient
-# from qdrant_client.http import models
-# from pymongo import MongoClient
-# from ingestion.text_cleaner import chunk_text
-# from dotenv import load_dotenv
-# import requests
-#
-# load_dotenv()
-# MONGO_URI=os.getenv("MONGO_URI"); MONGO_DB=os.getenv("MONGO_DB")
-# QDRANT_URL=os.getenv("QDRANT_URL")
-# EMBED_MODEL=os.getenv("EMBED_MODEL")
-#
-# mongo=MongoClient(MONGO_URI)[MONGO_DB]["pages"]
-# qdrant=QdrantClient(url=QDRANT_URL)
-# COLL="confluence_vectors"
-# if COLL not in [c.name for c in qdrant.get_collections().collections]:
-#     qdrant.create_collection(
-#         collection_name=COLL,
-#         vectors_config=models.VectorParams(size=4096, distance=models.Distance.COSINE)
-#     )
-#
-# def embed(texts):
-#     # r=requests.post("http://ollama:11434/api/embeddings",
-#     #                 json={"model":EMBED_MODEL,"input":texts})
-#     r = requests.post("http://[::1]:11434/api/embeddings",
-#                       json={"model": EMBED_MODEL, "input": texts})
-#     return [v["embedding"] for v in r.json()["data"]]
-#
-# def run():
-#     for doc in mongo.find({}):
-#         for i,chunk in enumerate(chunk_text(doc["content_text"])):
-#             vec=embed([chunk])[0]
-#             qdrant.upsert(collection_name=COLL, points=[models.PointStruct(
-#                 id=f"{doc['page_id']}_{i}",
-#                 vector=vec,
-#                 payload={
-#                     "page_id":doc["page_id"],
-#                     "title":doc["title"],
-#                     "url":doc["url"],
-#                     "chunk":chunk
-#                 }
-#             )])
-#             logging.info(f"Embedded {doc['title']} chunk {i}")
+from __future__ import annotations
 
-
-
-import os, logging
+import logging
 import uuid
+
+import requests
+from dotenv import load_dotenv
+from pymongo import MongoClient
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
-from pymongo import MongoClient
-from ingestion.text_cleaner import chunk_text
-from dotenv import load_dotenv
-import requests
+
+from config.settings import settings
+from ingestion.text_cleaner import hierarchical_chunks
 
 load_dotenv()
-MONGO_URI = os.getenv("MONGO_URI")
-MONGO_DB = os.getenv("MONGO_DB")
-QDRANT_URL = os.getenv("QDRANT_URL")
-EMBED_MODEL = os.getenv("EMBED_MODEL")
 
-mongo = MongoClient(MONGO_URI)[MONGO_DB]["pages"]
-qdrant = QdrantClient(url=QDRANT_URL)
-COLL = "confluence_vectors"
-if COLL not in [c.name for c in qdrant.get_collections().collections]:
+logging.basicConfig(level=logging.INFO)
+
+mongo = MongoClient(settings.mongo_uri)[settings.mongo_db]["pages"]
+qdrant = QdrantClient(url=settings.qdrant_url)
+COLLECTION_NAME = settings.qdrant_collection
+if COLLECTION_NAME not in [c.name for c in qdrant.get_collections().collections]:
     qdrant.create_collection(
-        collection_name=COLL,
-        vectors_config=models.VectorParams(size=768, distance=models.Distance.COSINE)
+        collection_name=COLLECTION_NAME,
+        vectors_config=models.VectorParams(size=768, distance=models.Distance.COSINE),
     )
 
-# --- NEW: Define a constant UUID namespace for generating deterministic IDs ---
-CONFLUENCE_NAMESPACE = uuid.UUID('1b671a64-40d5-491e-99b0-da01ff1f3341')
+CONFLUENCE_NAMESPACE = uuid.UUID("1b671a64-40d5-491e-99b0-da01ff1f3341")
 
 
 def embed(text_to_embed: str):
-    """
-    Robustly gets a single embedding from Ollama, with error checking.
-    """
+    """Robustly gets a single embedding from Ollama, with error checking."""
+
     try:
-        r = requests.post("http://[::1]:11434/api/embeddings",
-                          json={"model": EMBED_MODEL, "prompt": text_to_embed},
-                          timeout=60)
+        r = requests.post(
+            f"{settings.ollama_base_url}/api/embeddings",
+            json={"model": settings.embed_model, "prompt": text_to_embed},
+            timeout=60,
+        )
 
         r.raise_for_status()
         json_response = r.json()
@@ -91,44 +47,63 @@ def embed(text_to_embed: str):
 
         if "embedding" in json_response:
             return json_response["embedding"]
-        else:
-            logging.error(f"Ollama response missing 'embedding' key. Response: {json_response}")
-            return None
+        logging.error(
+            "Ollama response missing 'embedding' key. Response: %s", json_response
+        )
+        return None
 
     except requests.exceptions.HTTPError as http_err:
-        logging.error(f"HTTP error occurred: {http_err} - Response: {r.text}")
+        logging.error("HTTP error occurred: %s - Response: %s", http_err, r.text)
         return None
     except requests.exceptions.ConnectionError as conn_err:
-        logging.error(f"Connection error occurred: {conn_err}")
+        logging.error("Connection error occurred: %s", conn_err)
         return None
-    except Exception as e:
-        logging.error(f"An error occurred in embed function: {e} - Response: {r.text}")
+    except Exception as e:  # pylint: disable=broad-except
+        logging.error("An error occurred in embed function: %s", e)
         return None
-
-
 def run():
     for doc in mongo.find({}):
-        for i, chunk in enumerate(chunk_text(doc["content_text"])):
-
-            vec = embed(chunk)
+        for i, chunk in enumerate(hierarchical_chunks(doc["content_text"])):
+            vec = embed(chunk["child_text"])
 
             if vec is None:
-                logging.warning(f"Skipping chunk {i} for doc '{doc['title']}' due to embedding error.")
+                logging.warning(
+                    "Skipping chunk %s for doc '%s' due to embedding error.",
+                    i,
+                    doc["title"],
+                )
                 continue
 
-                # --- THIS IS THE FIX ---
-            # Create a unique, deterministic UUID for the chunk ID
-            chunk_id_str = f"{doc['page_id']}_{i}"
-            chunk_uuid = str(uuid.uuid5(CONFLUENCE_NAMESPACE, chunk_id_str))
+            chunk_uuid = str(
+                uuid.uuid5(
+                    CONFLUENCE_NAMESPACE, f"{doc['page_id']}_{chunk['parent_index']}_{chunk['child_index']}"
+                )
+            )
 
-            qdrant.upsert(collection_name=COLL, points=[models.PointStruct(
-                id=chunk_uuid,  # Use the new UUID
-                vector=vec,
-                payload={
-                    "page_id": doc["page_id"],
-                    "title": doc["title"],
-                    "url": doc["url"],
-                    "chunk": chunk
-                }
-            )])
-            logging.info(f"Embedded {doc['title']} chunk {i}")
+            qdrant.upsert(
+                collection_name=COLLECTION_NAME,
+                points=[
+                    models.PointStruct(
+                        id=chunk_uuid,
+                        vector=vec,
+                        payload={
+                            "page_id": doc["page_id"],
+                            "title": doc["title"],
+                            "url": doc["url"],
+                            "chunk": chunk["child_text"],
+                            "parent_text": chunk["parent_text"],
+                            "parent_index": chunk["parent_index"],
+                        },
+                    )
+                ],
+            )
+            logging.info(
+                "Embedded %s chunk %s.%s",
+                doc["title"],
+                chunk["parent_index"],
+                chunk["child_index"],
+            )
+
+
+if __name__ == "__main__":
+    run()
