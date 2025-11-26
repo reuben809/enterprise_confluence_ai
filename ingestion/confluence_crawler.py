@@ -23,23 +23,6 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 
-# MongoDB connection
-client = MongoClient(MONGO_URI)
-db = client[MONGO_DB]
-col = db["pages"]
-col.create_index("page_id", unique=True)
-
-# HTTP session
-session = requests.Session()
-session.headers.update({
-    "Accept": "application/json",
-    "Authorization": f"Bearer {PAT}"
-})
-
-
-# ---------- Helpers: robust request ----------
-
-def safe_request(url, tries=4, backoff=1.5):
     """Resilient HTTP GET with retry/backoff"""
     for i in range(tries):
         try:

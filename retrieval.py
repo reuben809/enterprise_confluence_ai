@@ -55,12 +55,12 @@ class HybridRetriever:
     ) -> List[Dict[str, Any]]:
         self._ensure_bm25()
 
-        vector_results = self.qdrant.search(
+        vector_results = self.qdrant.query_points(
             collection_name=self.collection_name,
-            query_vector=query_vector,
+            query=query_vector,
             limit=limit * 2,
             with_payload=True,
-        )
+        ).points
 
         candidates: Dict[str, Dict[str, Any]] = {}
         for result in vector_results:
