@@ -23,6 +23,36 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 
+# MongoDB connection
+client = MongoClient(MONGO_URI)
+db = client[MONGO_DB]
+col = db["pages"]
+col.create_index("page_id", unique=True)
+
+# HTTP session - MODIFIED to support public Confluence
+# Original code (commented for reference):
+# session = requests.Session()
+# session.headers.update({
+#     "Accept": "application/json",
+#     "Authorization": f"Bearer {PAT}"
+# })
+
+# NEW: Support both authenticated and anonymous (public) Confluence access
+session = requests.Session()
+if PAT and PAT.lower() != "anonymous":
+    # Authenticated access (for private Confluence)
+    session.headers.update({
+        "Accept": "application/json",
+        "Authorization": f"Bearer {PAT}"
+    })
+else:
+    # Anonymous access (for public Confluence like Apache's cwiki)
+    session.headers.update({"Accept": "application/json"})
+
+
+# ---------- Helpers: robust request ----------
+
+def safe_request(url, tries=4, backoff=1.5):
     """Resilient HTTP GET with retry/backoff"""
     for i in range(tries):
         try:
