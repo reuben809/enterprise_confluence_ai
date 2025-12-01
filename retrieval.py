@@ -112,6 +112,7 @@ class HybridRetriever:
 
 
 class Reranker:
+    """LLM-based reranker (temporary - using until BGE model accessible)"""
     def __init__(self, ollama_url: str, model: str):
         self.ollama_url = ollama_url.rstrip("/")
         self.model = model
