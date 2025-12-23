@@ -4,7 +4,7 @@ requests
 beautifulsoup4
 tqdm
 pymongo
-qdrant-client
+qdrant-client[fastembed]
 python-dotenv
 pyyaml
 streamlit
@@ -13,9 +13,9 @@ lxml
 langchain
 langchain-community
 langchain-text-splitters
-ollama
-rank-bm25==0.2.2
-# New dependencies for optimization
-# sentence-transformers>=2.2.0  # BGE reranker - DISABLED due to corporate firewall
-aiohttp>=3.9.0  # Async HTTP for crawler
-scikit-learn>=1.3.0  # TF-IDF for sparse vectors
+openai>=1.0.0
+fastembed>=0.2.0
+flashrank>=0.2.0
+# Removed: ollama
+# Removed: rank-bm25
+# Removed: scikit-learn

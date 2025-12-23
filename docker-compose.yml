@@ -52,7 +52,9 @@ services:
       ollama:
         condition: service_started
     env_file: .env
-    volumes: [ ".:/app" ]
+    volumes:
+      - ".:/app"
+      - "./models_cache:/app/models" # Mount local models directory
     ports: [ "8000:8000" ]
     command: [ "uvicorn", "chat.chat_api:app", "--host", "0.0.0.0", "--port", "8000", "--reload" ]
 
