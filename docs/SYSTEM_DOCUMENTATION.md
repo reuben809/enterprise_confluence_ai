@@ -34,16 +34,9 @@ gantt
     Agentic RAG                 :p3c, 2025-02-01, 21d
 ```
 
-### Completed Milestones
-| Phase | Milestone | Status |
-|-------|-----------|--------|
-| 1 | FastEmbed for local embeddings | ✅ Done |
-| 1 | Qdrant native sparse vectors | ✅ Done |
-| 1 | LM Studio OpenAI-compatible API | ✅ Done |
-| 2 | Hybrid search with RRF fusion | ✅ Done |
-| 2 | Streamlit chat interface | ✅ Done |
 
-### Upcoming Milestones
+
+### Upcoming
 | Phase | Milestone | Target |
 |-------|-----------|--------|
 | 2 | FlashRank cross-encoder reranking | Q4 2024 |
