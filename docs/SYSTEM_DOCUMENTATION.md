@@ -1,4 +1,4 @@
-git # Enterprise Confluence AI - System Documentation
+# Enterprise Confluence AI - System Documentation
 
 ## 1. Executive Summary
 
