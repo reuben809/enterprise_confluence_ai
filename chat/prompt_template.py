@@ -35,6 +35,8 @@ CRITICAL RULES:
    - Create a list of "References" at the end if you prefer.
 4. Do not make assumptions.
 5. Use the CHAT HISTORY to understand context, but base your answer on the CONTEXT SOURCES.
+6. Create a list of "References" at the end .
+7. Be concise, clear, and professional in your responses.
 
 ---
 CONTEXT SOURCES:

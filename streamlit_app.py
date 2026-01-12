@@ -2,7 +2,10 @@ import streamlit as st
 import requests
 import json
 import os
+import logging
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 # API_URL uses the service name from docker-compose, or localhost for local dev
 API_URL = os.getenv("API_URL", "http://localhost:8000")
@@ -133,7 +136,8 @@ def check_api_health():
     try:
         resp = requests.get(f"{API_URL}/health", timeout=5)
         return resp.status_code == 200
-    except:
+    except requests.RequestException as e:
+        logger.warning(f"Health check failed: {e}")
         return False
 
 
@@ -149,7 +153,7 @@ if "feedback_given" not in st.session_state:
 
 # --- Sidebar ---
 with st.sidebar:
-    st.image("https://upload.wikimedia.org/wikipedia/commons/8/82/Confluence_Logo.svg", width=150)
+    st.image("https://honicon.com/wp-content/uploads/2020/01/confluence-1024x134.png", width=150)
     
     # API Status
     api_status = check_api_health()

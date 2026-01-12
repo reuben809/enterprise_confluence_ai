@@ -6,6 +6,7 @@ tqdm
 pymongo
 qdrant-client[fastembed]
 python-dotenv
+pydantic-settings>=2.0.0
 pyyaml
 streamlit
 httpx

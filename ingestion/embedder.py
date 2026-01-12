@@ -4,11 +4,9 @@ import logging
 import uuid
 import sys
 import os
-import ssl
 from typing import List, Dict, Any
 
 # --- MANUAL MODEL LOADING ---
-# Since HuggingFace is blocked, models are loaded from local cache
 # Path is configurable via FASTEMBED_CACHE_PATH in .env
 # ----------------------------
 
@@ -136,7 +134,6 @@ def run():
                     "parent_text": chunk["parent_text"],
                     "parent_index": chunk["parent_index"],
                     "child_index": chunk["child_index"],
-                    # New metadata
                     "linked_page_ids": linked_page_ids,
                     "has_table": has_table,
                 }

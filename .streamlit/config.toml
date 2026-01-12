@@ -1,0 +1,15 @@
+[theme]
+# Primary accent color - purple gradient
+primaryColor = "#667eea"
+
+# Background color for the main content area - dark
+backgroundColor = "#0e1117"
+
+# Background color for sidebar and input widgets
+secondaryBackgroundColor = "#1e2130"
+
+# Color of text - light for dark theme
+textColor = "#fafafa"
+
+# Font family
+font = "sans serif"
