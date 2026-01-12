@@ -213,10 +213,12 @@ class LocalReranker:
     High-speed local reranker using FlashRank (TinyBERT).
     Replaces slow LLM calls.
     """
-    def __init__(self, model_name: str = "ms-marco-TinyBERT-L-2-v2"):
+    def __init__(self, model_name: str = "ms-marco-TinyBERT-L-2-v2", cache_dir: str = None):
         try:
-            logger.info(f"Loading FlashRank model: {model_name}...")
-            self.ranker = Ranker(model_name=model_name)
+            # Use local cache to avoid downloading from HuggingFace
+            model_cache = cache_dir or settings.fastembed_cache_path
+            logger.info(f"Loading FlashRank model: {model_name} from {model_cache}...")
+            self.ranker = Ranker(model_name=model_name, cache_dir=model_cache)
             logger.info("FlashRank loaded successfully!")
         except Exception as e:
             logger.warning(f"FlashRank failed to load: {e}. Using pass-through reranking.")

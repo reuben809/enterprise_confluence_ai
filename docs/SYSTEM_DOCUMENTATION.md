@@ -107,18 +107,19 @@ enterprise_confluence_ai/
 │   ├── chat_api.py          # FastAPI endpoints
 │   └── prompt_template.py   # System prompts
 ├── ingestion/
-│   ├── embedder.py          # FastEmbed pipeline
-│   ├── text_cleaner.py      # Hierarchical chunking
-│   └── extract.py           # Confluence scraper
+│   ├── embedder.py            # FastEmbed pipeline
+│   ├── text_cleaner.py        # Hierarchical chunking
+│   └── confluence_crawler.py  # Confluence scraper
 ├── config/
-│   └── settings.py          # Pydantic settings
+│   └── settings.py            # Pydantic settings
 ├── utils/
-│   └── llm_client.py        # OpenAI SDK wrapper
-├── retrieval.py             # HybridRetriever + LocalReranker
-├── streamlit_app.py         # UI application
-└── models_cache/            # Local ONNX models
-    ├── bge-small-en-v1.5/   # Dense model (384d)
-    └── Splade_PP_en_v1/     # Sparse model
+│   └── llm_client.py          # OpenAI SDK wrapper
+├── retrieval.py               # HybridRetriever + LocalReranker
+├── streamlit_app.py           # UI application
+└── models_cache/              # Local ONNX models
+    ├── bge-small-en-v1.5/     # Dense model (384d)
+    ├── Splade_PP_en_v1/       # Sparse model
+    └── ms-marco-TinyBERT-L-2-v2/ # Reranker model
 ```
 
 ### 4.2 Key Classes
@@ -144,8 +145,10 @@ class HybridRetriever:
 class LocalReranker:
     """Cross-encoder reranking using FlashRank."""
 
-    def __init__(self, model_name="ms-marco-TinyBERT-L-2-v2"):
-        self.ranker = Ranker(model_name=model_name)
+    def __init__(self, model_name="ms-marco-TinyBERT-L-2-v2", cache_dir=None):
+        # Use local cache to avoid downloading from HuggingFace
+        model_cache = cache_dir or settings.fastembed_cache_path
+        self.ranker = Ranker(model_name=model_name, cache_dir=model_cache)
 
     def rerank(self, query: str, candidates: List, top_n: int = 5) -> List:
         # Score candidates against query
@@ -173,9 +176,9 @@ flowchart LR
 
     subgraph Chunking
         HC[Hierarchical Chunking]
-        P["Parent Chunk (~800 tokens)"]
-        C1["Child 1 (~200 tokens)"]
-        C2["Child 2 (~200 tokens)"]
+        P["Parent Chunk (~1400 chars)"]
+        C1["Child 1 (~400 chars)"]
+        C2["Child 2 (~400 chars)"]
     end
 
     subgraph Embedding
@@ -339,6 +342,7 @@ flowchart TB
 | Issue                     | Cause                          | Solution                          |
 |---------------------------|--------------------------------|-----------------------------------|
 | SSLError                  | Firewall blocking HuggingFace  | Download models manually          |
+| FlashRank SSL Error       | Corporate firewall/proxy       | Set `cache_dir=./models_cache` in LocalReranker |
 | model_max_length overflow | Tokenizer config issue          | Set to 512 in tokenizer_config.json |
 | vector name not found     | Collection schema mismatch      | Delete collection, re-run ingestion |
 | No response in UI         | NDJSON vs SSE format           | Fixed in streamlit_app.py         |
