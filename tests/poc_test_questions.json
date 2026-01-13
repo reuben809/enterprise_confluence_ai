@@ -1,0 +1,86 @@
+{
+  "test_questions": [
+    {
+      "id": 1,
+      "question": "How do I set up VPN access?",
+      "category": "procedural",
+      "expected_sources": ["IT Setup Guide", "VPN Configuration"],
+      "success_criteria": "Answer includes step-by-step instructions with links"
+    },
+    {
+      "id": 2,
+      "question": "What is our vacation policy?",
+      "category": "factual",
+      "expected_sources": ["HR Handbook", "Leave Policy"],
+      "success_criteria": "Answer mentions number of days and approval process"
+    },
+    {
+      "id": 3,
+      "question": "How do I deploy to production?",
+      "category": "procedural",
+      "expected_sources": ["DevOps Guide", "Deployment Runbook"],
+      "success_criteria": "Answer includes prerequisites, steps, and verification"
+    },
+    {
+      "id": 4,
+      "question": "Who is the product manager for Project X?",
+      "category": "factual",
+      "expected_sources": ["Team Directory", "Project X Overview"],
+      "success_criteria": "Answer provides name and contact information"
+    },
+    {
+      "id": 5,
+      "question": "What are the API authentication methods?",
+      "category": "technical",
+      "expected_sources": ["API Documentation", "Authentication Guide"],
+      "success_criteria": "Answer lists methods (OAuth, API keys, etc.) with examples"
+    },
+    {
+      "id": 6,
+      "question": "How do I troubleshoot database connection errors?",
+      "category": "troubleshooting",
+      "expected_sources": ["Troubleshooting Guide", "Database Documentation"],
+      "success_criteria": "Answer provides diagnostic steps and common solutions"
+    },
+    {
+      "id": 7,
+      "question": "What is the onboarding process for new engineers?",
+      "category": "procedural",
+      "expected_sources": ["Onboarding Guide", "Engineering Handbook"],
+      "success_criteria": "Answer includes timeline, required training, and contacts"
+    },
+    {
+      "id": 8,
+      "question": "Where can I find the Q4 roadmap?",
+      "category": "navigational",
+      "expected_sources": ["Product Roadmap", "Q4 Planning"],
+      "success_criteria": "Answer provides direct link to roadmap document"
+    },
+    {
+      "id": 9,
+      "question": "What are the security best practices for handling customer data?",
+      "category": "policy",
+      "expected_sources": ["Security Policy", "Data Handling Guidelines"],
+      "success_criteria": "Answer covers encryption, access control, and compliance"
+    },
+    {
+      "id": 10,
+      "question": "How do I request a new software license?",
+      "category": "procedural",
+      "expected_sources": ["IT Procurement", "Software Request Process"],
+      "success_criteria": "Answer includes approval workflow and timeline"
+    }
+  ],
+  "evaluation_rubric": {
+    "accuracy": "Does the answer correctly address the question? (0-5)",
+    "completeness": "Does the answer provide sufficient detail? (0-5)",
+    "relevance": "Are the sources relevant to the question? (0-5)",
+    "clarity": "Is the answer well-structured and easy to understand? (0-5)",
+    "citations": "Are sources properly cited? (0-5)"
+  },
+  "success_threshold": {
+    "minimum_score": 20,
+    "maximum_score": 25,
+    "passing_percentage": 80
+  }
+}
