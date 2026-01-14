@@ -10,9 +10,7 @@ from qdrant_client import QdrantClient
 from config.settings import settings
 from retrieval import HybridRetriever, LocalReranker
 from utils.llm_client import LLMClient
-from utils.query_processor import QueryProcessor
 from chat.prompt_template import CHAT_SYSTEM_PROMPT_TEMPLATE
-from chat.feedback_store import feedback_store
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO)
@@ -30,8 +28,7 @@ retriever = HybridRetriever(
     collection_name=settings.qdrant_collection
 )
 reranker = LocalReranker(model_name=settings.ollama_rerank_model or "ms-marco-TinyBERT-L-2-v2")
-llm_client = LLMClient(base_url=settings.ollama_base_url)
-query_processor = QueryProcessor()  # NEW: Query preprocessing
+llm_client = LLMClient(base_url=settings.ollama_base_url) # Reusing 'ollama_base_url' config key for LLM URL for now
 
 logger.info("✅ System Components Initialized")
 
@@ -50,8 +47,6 @@ class FeedbackRequest(BaseModel):
     answer: str
     sources: List[dict]
     feedback: str  # positive/negative
-    user_id: Optional[str] = None
-    comment: Optional[str] = None
 
 
 # --- Helper ---
@@ -73,26 +68,22 @@ def build_context(candidates: List[dict]) -> str:
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok", "components": ["fastapi", "qdrant", "fastembed", "flashrank", "query_processor"]}
+    return {"status": "ok", "components": ["fastapi", "qdrant", "fastembed", "flashrank"]}
 
 @app.post("/chat")
 async def chat_endpoint(request: ChatRequest):
     start_time = time.time()
     logger.info(f"Received question: {request.question}")
 
-    # NEW: Preprocess query
-    processed_query = query_processor.process(request.question)
-    logger.info(f"Processed query: {processed_query['processed']}")
-
     # 1. Retrieval (Hybrid: Dense + Sparse)
-    # Use expanded query for better retrieval
-    hybrid_results = retriever.search(processed_query["expanded"], limit=20)
+    # Get more candidates for reranking
+    hybrid_results = retriever.search(request.question, limit=20)
     
     if not hybrid_results:
         return JSONResponse(content={"answer": "I couldn't find any relevant documents.", "sources": []})
 
     # 2. Reranking (FlashRank)
-    # Rerank using original query (more precise)
+    # Rerank top 20 -> top 5
     reranked = reranker.rerank(request.question, hybrid_results, top_n=settings.top_k)
     
     # 3. Context Construction
@@ -136,31 +127,7 @@ async def chat_endpoint(request: ChatRequest):
 
 
 @app.post("/feedback")
-def feedback_endpoint(request: FeedbackRequest):
-    """Store user feedback (thumbs up/down) for a response."""
-    try:
-        feedback_id = feedback_store.save_feedback(
-            question=request.question,
-            answer=request.answer,
-            sources=request.sources,
-            feedback_type=request.feedback,
-            user_id=request.user_id,
-            comment=request.comment
-        )
-        logger.info(f"Feedback saved: {request.feedback} for Q: {request.question[:50]}...")
-        return {"status": "saved", "id": feedback_id}
-    except Exception as e:
-        logger.error(f"Failed to save feedback: {e}")
-        raise HTTPException(status_code=500, detail="Failed to save feedback")
-
-
-@app.get("/feedback/stats")
-def feedback_stats():
-    """Get aggregated feedback statistics."""
-    return feedback_store.get_feedback_stats()
-
-
-@app.get("/feedback/recent")
-def recent_feedback(limit: int = 20, feedback_type: Optional[str] = None):
-    """Get recent feedback entries for review."""
-    return feedback_store.get_recent_feedback(limit=limit, feedback_type=feedback_type)
+def feedback_endpoint(feedback: FeedbackRequest):
+    # Log feedback to file or DB (Placeholder)
+    logger.info(f"Feedback received: {feedback.feedback} for Q: {feedback.question}")
+    return {"status": "received"}
