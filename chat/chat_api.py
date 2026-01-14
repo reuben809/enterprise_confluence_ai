@@ -10,6 +10,7 @@ from qdrant_client import QdrantClient
 from config.settings import settings
 from retrieval import HybridRetriever, LocalReranker
 from utils.llm_client import LLMClient
+from utils.query_processor import QueryProcessor
 from chat.prompt_template import CHAT_SYSTEM_PROMPT_TEMPLATE
 from chat.feedback_store import feedback_store
 
@@ -29,7 +30,8 @@ retriever = HybridRetriever(
     collection_name=settings.qdrant_collection
 )
 reranker = LocalReranker(model_name=settings.ollama_rerank_model or "ms-marco-TinyBERT-L-2-v2")
-llm_client = LLMClient(base_url=settings.ollama_base_url) # Reusing 'ollama_base_url' config key for LLM URL for now
+llm_client = LLMClient(base_url=settings.ollama_base_url)
+query_processor = QueryProcessor()  # NEW: Query preprocessing
 
 logger.info("✅ System Components Initialized")
 
@@ -71,22 +73,26 @@ def build_context(candidates: List[dict]) -> str:
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok", "components": ["fastapi", "qdrant", "fastembed", "flashrank"]}
+    return {"status": "ok", "components": ["fastapi", "qdrant", "fastembed", "flashrank", "query_processor"]}
 
 @app.post("/chat")
 async def chat_endpoint(request: ChatRequest):
     start_time = time.time()
     logger.info(f"Received question: {request.question}")
 
+    # NEW: Preprocess query
+    processed_query = query_processor.process(request.question)
+    logger.info(f"Processed query: {processed_query['processed']}")
+
     # 1. Retrieval (Hybrid: Dense + Sparse)
-    # Get more candidates for reranking
-    hybrid_results = retriever.search(request.question, limit=20)
+    # Use expanded query for better retrieval
+    hybrid_results = retriever.search(processed_query["expanded"], limit=20)
     
     if not hybrid_results:
         return JSONResponse(content={"answer": "I couldn't find any relevant documents.", "sources": []})
 
     # 2. Reranking (FlashRank)
-    # Rerank top 20 -> top 5
+    # Rerank using original query (more precise)
     reranked = reranker.rerank(request.question, hybrid_results, top_n=settings.top_k)
     
     # 3. Context Construction
