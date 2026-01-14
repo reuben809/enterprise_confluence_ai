@@ -7,7 +7,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 from qdrant_client import QdrantClient
 
-from chat import feedback_store
+from chat.feedback_store import feedback_store
 from config.settings import settings
 from retrieval import HybridRetriever, LocalReranker
 from utils.llm_client import LLMClient
@@ -48,6 +48,8 @@ class FeedbackRequest(BaseModel):
     answer: str
     sources: List[dict]
     feedback: str  # positive/negative
+    user_id: Optional[str] = None
+    comment: Optional[str] = None
 
 
 # --- Helper ---
@@ -58,8 +60,6 @@ def build_context(candidates: List[dict]) -> str:
     context = ""
     for c in candidates:
         meta = c["payload"]
-        # Format: [1] **Title** (URL)
-        # Content...
         context += f"Source: [{meta.get('title')}]({meta.get('url')})\n"
         context += f"{meta.get('chunk')}\n\n"
     return context
