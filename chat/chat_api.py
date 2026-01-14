@@ -11,6 +11,7 @@ from config.settings import settings
 from retrieval import HybridRetriever, LocalReranker
 from utils.llm_client import LLMClient
 from chat.prompt_template import CHAT_SYSTEM_PROMPT_TEMPLATE
+from chat.feedback_store import feedback_store
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO)
@@ -47,6 +48,8 @@ class FeedbackRequest(BaseModel):
     answer: str
     sources: List[dict]
     feedback: str  # positive/negative
+    user_id: Optional[str] = None
+    comment: Optional[str] = None
 
 
 # --- Helper ---
@@ -127,7 +130,31 @@ async def chat_endpoint(request: ChatRequest):
 
 
 @app.post("/feedback")
-def feedback_endpoint(feedback: FeedbackRequest):
-    # Log feedback to file or DB (Placeholder)
-    logger.info(f"Feedback received: {feedback.feedback} for Q: {feedback.question}")
-    return {"status": "received"}
+def feedback_endpoint(request: FeedbackRequest):
+    """Store user feedback (thumbs up/down) for a response."""
+    try:
+        feedback_id = feedback_store.save_feedback(
+            question=request.question,
+            answer=request.answer,
+            sources=request.sources,
+            feedback_type=request.feedback,
+            user_id=request.user_id,
+            comment=request.comment
+        )
+        logger.info(f"Feedback saved: {request.feedback} for Q: {request.question[:50]}...")
+        return {"status": "saved", "id": feedback_id}
+    except Exception as e:
+        logger.error(f"Failed to save feedback: {e}")
+        raise HTTPException(status_code=500, detail="Failed to save feedback")
+
+
+@app.get("/feedback/stats")
+def feedback_stats():
+    """Get aggregated feedback statistics."""
+    return feedback_store.get_feedback_stats()
+
+
+@app.get("/feedback/recent")
+def recent_feedback(limit: int = 20, feedback_type: Optional[str] = None):
+    """Get recent feedback entries for review."""
+    return feedback_store.get_recent_feedback(limit=limit, feedback_type=feedback_type)
