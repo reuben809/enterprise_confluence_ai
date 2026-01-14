@@ -11,6 +11,8 @@ from chat.feedback_store import feedback_store
 from config.settings import settings
 from retrieval import HybridRetriever, LocalReranker
 from utils.llm_client import LLMClient
+from utils.query_processor import QueryProcessor  # NEW: Query preprocessing
+from utils.citation_validator import CitationValidator  # NEW: Citation verification
 from chat.prompt_template import CHAT_SYSTEM_PROMPT_TEMPLATE
 
 # Setup Logging
@@ -29,7 +31,13 @@ retriever = HybridRetriever(
     collection_name=settings.qdrant_collection
 )
 reranker = LocalReranker(model_name=settings.ollama_rerank_model or "ms-marco-TinyBERT-L-2-v2")
-llm_client = LLMClient(base_url=settings.ollama_base_url)  # Reusing 'ollama_base_url' config key for LLM URL for now
+llm_client = LLMClient(base_url=settings.ollama_base_url)
+
+# 3. NEW: Query Processor (spell correction, expansion)
+query_processor = QueryProcessor()
+
+# 4. NEW: Citation Validator (detect hallucinated citations)
+citation_validator = CitationValidator()
 
 logger.info("✅ System Components Initialized")
 
@@ -69,7 +77,17 @@ def build_context(candidates: List[dict]) -> str:
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok", "components": ["fastapi", "qdrant", "fastembed", "flashrank"]}
+    return {
+        "status": "ok", 
+        "components": [
+            "fastapi", 
+            "qdrant", 
+            "fastembed", 
+            "flashrank",
+            "query_processor",  # NEW
+            "citation_validator"  # NEW
+        ]
+    }
 
 
 @app.post("/chat")
@@ -77,15 +95,23 @@ async def chat_endpoint(request: ChatRequest):
     start_time = time.time()
     logger.info(f"Received question: {request.question}")
 
+    # NEW STEP 0: Query Preprocessing
+    # This corrects typos, expands query with synonyms, and detects intent
+    processed_query = query_processor.process(request.question)
+    search_query = processed_query.expanded  # Use expanded query for retrieval
+    logger.info(f"Query processed: '{request.question}' -> '{processed_query.processed}' (intent: {processed_query.intent})")
+    if processed_query.corrections_made:
+        logger.info(f"Corrections applied: {processed_query.corrections_made}")
+
     # 1. Retrieval (Hybrid: Dense + Sparse)
-    # Get more candidates for reranking
-    hybrid_results = retriever.search(request.question, limit=20)
+    # Use processed/expanded query for better recall
+    hybrid_results = retriever.search(search_query, limit=20)
 
     if not hybrid_results:
         return JSONResponse(content={"answer": "I couldn't find any relevant documents.", "sources": []})
 
     # 2. Reranking (FlashRank)
-    # Rerank top 20 -> top 5
+    # Use ORIGINAL query for reranking (more precise matching)
     reranked = reranker.rerank(request.question, hybrid_results, top_n=settings.top_k)
 
     # 3. Context Construction
@@ -109,11 +135,21 @@ async def chat_endpoint(request: ChatRequest):
         user_query=request.question
     )
 
-    # 5. Streaming Generation
+    # 5. Streaming Generation with Citation Verification
     async def response_generator():
-        # First yield sources
         import json
-        yield json.dumps({"type": "sources", "data": unique_sources}) + "\n"
+        
+        # First yield sources and query processing info
+        yield json.dumps({
+            "type": "sources", 
+            "data": unique_sources,
+            "query_info": {
+                "original": processed_query.original,
+                "processed": processed_query.processed,
+                "intent": processed_query.intent,
+                "corrections": processed_query.corrections_made
+            }
+        }) + "\n"
 
         full_answer = ""
         async for token in llm_client.generate_stream(full_prompt, model=settings.ollama_llm):
@@ -121,9 +157,22 @@ async def chat_endpoint(request: ChatRequest):
                 full_answer += token
                 yield json.dumps({"type": "token", "data": token}) + "\n"
 
+        # NEW: Verify citations after response is complete
+        citation_result = citation_validator.verify(full_answer, unique_sources)
+        
+        # Log any hallucinated citations
+        if citation_result.invalid_citations:
+            logger.warning(f"Hallucinated citations detected: {citation_result.invalid_citations}")
+        
+        # Yield citation verification results
+        yield json.dumps({
+            "type": "citation_check",
+            "data": citation_result.to_dict()
+        }) + "\n"
+
         yield json.dumps({"type": "end"}) + "\n"
 
-        logger.info(f"Chat processing took {time.time() - start_time:.2f}s")
+        logger.info(f"Chat processing took {time.time() - start_time:.2f}s (citation accuracy: {citation_result.citation_accuracy:.1%})")
 
     return StreamingResponse(response_generator(), media_type="application/x-ndjson")
 

@@ -69,9 +69,12 @@ class HybridRetriever:
         """
         Apply Maximal Marginal Relevance for diverse results.
         
+        OPTIMIZED: Uses pre-fetched vectors from Qdrant instead of re-embedding.
+        This reduces complexity from O(n² × embedding_time) to O(n × k).
+        
         Args:
-            query_embedding: The query vector
-            candidates: List of search results with embeddings
+            query_embedding: The query vector (numpy array)
+            candidates: List of search results WITH pre-fetched 'vector' field
             limit: Number of results to return
             lambda_param: Balance between relevance (1.0) and diversity (0.0)
                          Default 0.7 = 70% relevance, 30% diversity
@@ -82,50 +85,66 @@ class HybridRetriever:
         if len(candidates) <= limit:
             return candidates
         
-        selected = []
-        remaining = candidates.copy()
+        n_candidates = len(candidates)
         
-        # Get embeddings for all candidates (we'll use dense for diversity calculation)
-        candidate_embeddings = []
-        for c in remaining:
-            # Generate embedding for each chunk
-            chunk_text = c["payload"].get("chunk", "")
-            if chunk_text:
-                emb = list(self.dense_model.embed([chunk_text]))[0]
-                candidate_embeddings.append(emb)
+        # Extract pre-computed embeddings from candidates (fetched from Qdrant)
+        # If vectors weren't fetched, fall back to zeros (shouldn't happen with correct query)
+        embeddings = np.zeros((n_candidates, 384))
+        for i, c in enumerate(candidates):
+            if "vector" in c and c["vector"] is not None:
+                # Qdrant returns vectors in the 'vector' field
+                vec = c["vector"].get("dense", None)
+                if vec is not None:
+                    embeddings[i] = np.array(vec)
+        
+        # Normalize query embedding
+        query_norm = query_embedding / (np.linalg.norm(query_embedding) + 1e-10)
+        
+        # Pre-compute all relevance scores (query similarity) using vectorized operation
+        embedding_norms = np.linalg.norm(embeddings, axis=1, keepdims=True) + 1e-10
+        normalized_embeddings = embeddings / embedding_norms
+        relevance_scores = np.dot(normalized_embeddings, query_norm)
+        
+        # Track selected indices and remaining indices
+        selected_indices = []
+        remaining_mask = np.ones(n_candidates, dtype=bool)
+        
+        # Select k items using MMR
+        for _ in range(min(limit, n_candidates)):
+            if not remaining_mask.any():
+                break
+            
+            # Get indices of remaining candidates
+            remaining_indices = np.where(remaining_mask)[0]
+            
+            if len(selected_indices) == 0:
+                # First selection: pick highest relevance
+                best_remaining_idx = remaining_indices[np.argmax(relevance_scores[remaining_indices])]
             else:
-                candidate_embeddings.append(np.zeros(384))  # Default for empty
-        
-        while len(selected) < limit and remaining:
-            mmr_scores = []
-            
-            for i, (cand, cand_emb) in enumerate(zip(remaining, candidate_embeddings)):
-                # Relevance: similarity to query
-                relevance = self._cosine_similarity(query_embedding, cand_emb)
+                # Compute MMR scores for remaining candidates
+                mmr_scores = np.zeros(len(remaining_indices))
                 
-                # Diversity: max similarity to already selected items
-                max_sim_to_selected = 0.0
-                if selected:
-                    for sel_idx in [candidates.index(s) for s in selected if s in candidates]:
-                        sim = self._cosine_similarity(
-                            cand_emb, 
-                            candidate_embeddings[candidates.index(remaining[0]) if remaining else 0]
-                        )
-                        max_sim_to_selected = max(max_sim_to_selected, sim)
+                # Get embeddings of selected items
+                selected_embeddings = normalized_embeddings[selected_indices]
                 
-                # MMR score
-                mmr = lambda_param * relevance - (1 - lambda_param) * max_sim_to_selected
-                mmr_scores.append((i, mmr, cand))
+                for j, idx in enumerate(remaining_indices):
+                    # Relevance component
+                    rel = relevance_scores[idx]
+                    
+                    # Diversity component: max similarity to any selected item
+                    similarities_to_selected = np.dot(selected_embeddings, normalized_embeddings[idx])
+                    max_sim = np.max(similarities_to_selected) if len(similarities_to_selected) > 0 else 0.0
+                    
+                    # MMR formula: λ * relevance - (1-λ) * max_similarity_to_selected
+                    mmr_scores[j] = lambda_param * rel - (1 - lambda_param) * max_sim
+                
+                best_remaining_idx = remaining_indices[np.argmax(mmr_scores)]
             
-            # Select highest MMR score
-            mmr_scores.sort(key=lambda x: x[1], reverse=True)
-            best_idx, _, best_cand = mmr_scores[0]
-            
-            selected.append(best_cand)
-            remaining.pop(best_idx)
-            candidate_embeddings.pop(best_idx)
+            selected_indices.append(best_remaining_idx)
+            remaining_mask[best_remaining_idx] = False
         
-        return selected
+        # Return candidates in MMR order
+        return [candidates[i] for i in selected_indices]
 
     def search(
         self, 
@@ -176,22 +195,29 @@ class HybridRetriever:
             ),
         ]
 
+        # OPTIMIZED: Fetch pre-computed dense vectors when MMR is enabled
+        # This eliminates the need to re-embed candidates during MMR
         results = self.qdrant.query_points(
             collection_name=self.collection_name,
             prefetch=prefetch,
             query=models.FusionQuery(fusion=models.Fusion.RRF),
             limit=fetch_limit if use_mmr else limit,
-            with_payload=True
+            with_payload=True,
+            with_vectors=["dense"] if use_mmr else None  # Fetch vectors only when needed
         ).points
 
-        # 3. Format results
+        # 3. Format results (include vectors if fetched for MMR)
         hits = []
         for hit in results:
-            hits.append({
+            hit_dict = {
                 "id": str(hit.id),
                 "payload": hit.payload,
                 "score": hit.score
-            })
+            }
+            # Include vectors for MMR processing
+            if use_mmr and hit.vector is not None:
+                hit_dict["vector"] = hit.vector
+            hits.append(hit_dict)
         
         # 4. Apply MMR if requested
         if use_mmr and len(hits) > limit:
