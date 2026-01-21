@@ -24,11 +24,15 @@ class HybridRetriever:
         self, 
         qdrant: QdrantClient, 
         collection_name: str,
-        dense_model_name: str = "BAAI/bge-small-en-v1.5",
-        sparse_model_name: str = "prithivida/Splade_PP_en_v1"
+        dense_model_name: str = None,
+        sparse_model_name: str = None
     ):
         self.qdrant = qdrant
         self.collection_name = collection_name
+        
+        # Use settings for model names if not provided
+        dense_model_name = dense_model_name or settings.embedding_model
+        sparse_model_name = sparse_model_name or settings.sparse_model
         
         # Load embedding models using configurable cache path
         logger.info(f"Initializing HybridRetriever models from {settings.fastembed_cache_path}...")
@@ -45,7 +49,7 @@ class HybridRetriever:
         
         # Query cache for repeated queries
         self._cache: Dict[str, List[Dict[str, Any]]] = {}
-        self._cache_max_size = 100
+        self._cache_max_size = settings.query_cache_size
 
     def _get_cache_key(self, query: str, limit: int, use_mmr: bool) -> str:
         """Generate cache key from query parameters."""
@@ -64,7 +68,7 @@ class HybridRetriever:
         query_embedding: np.ndarray,
         candidates: List[Dict[str, Any]], 
         limit: int,
-        lambda_param: float = 0.7
+        lambda_param: float = None
     ) -> List[Dict[str, Any]]:
         """
         Apply Maximal Marginal Relevance for diverse results.
@@ -77,11 +81,14 @@ class HybridRetriever:
             candidates: List of search results WITH pre-fetched 'vector' field
             limit: Number of results to return
             lambda_param: Balance between relevance (1.0) and diversity (0.0)
-                         Default 0.7 = 70% relevance, 30% diversity
+                         Default from settings.mmr_lambda
         
         Returns:
             Reordered list prioritizing both relevance and diversity
         """
+        # Use settings value if not provided
+        lambda_param = lambda_param if lambda_param is not None else settings.mmr_lambda
+        
         if len(candidates) <= limit:
             return candidates
         
@@ -89,7 +96,7 @@ class HybridRetriever:
         
         # Extract pre-computed embeddings from candidates (fetched from Qdrant)
         # If vectors weren't fetched, fall back to zeros (shouldn't happen with correct query)
-        embeddings = np.zeros((n_candidates, 384))
+        embeddings = np.zeros((n_candidates, settings.embedding_dimension))
         for i, c in enumerate(candidates):
             if "vector" in c and c["vector"] is not None:
                 # Qdrant returns vectors in the 'vector' field

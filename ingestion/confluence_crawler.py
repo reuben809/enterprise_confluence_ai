@@ -1,20 +1,36 @@
-import os, re, time, html, logging
+"""
+Confluence Crawler with Checkpoint/Resume and Incremental Sync
+
+Features:
+- Checkpoint/Resume: Saves progress to file, can resume after crash
+- Incremental Sync: Skips pages that haven't changed (based on version)
+- Configurable: All parameters from settings.py
+"""
+
+import os
+import re
+import time
+import json
+import logging
 from datetime import datetime
 from collections import deque
+from pathlib import Path
 from bs4 import BeautifulSoup
 from pymongo import MongoClient
 import requests
 
 from config.settings import settings
 
+# Configuration from settings
 BASE = (settings.base_url or "").rstrip("/")
 SPACE = settings.space_key
 PAT = settings.pat
 MONGO_URI = settings.mongo_uri
 MONGO_DB = settings.mongo_db
 
-if not BASE or not SPACE or not PAT:
-    raise RuntimeError("BASE_URL, SPACE_KEY, and PAT must be configured in the environment or .env file.")
+# Validate required settings
+if not BASE or not SPACE:
+    raise RuntimeError("BASE_URL and SPACE_KEY must be configured in the environment or .env file.")
 
 # Setup logging
 logging.basicConfig(
@@ -22,6 +38,11 @@ logging.basicConfig(
     format="[%(asctime)s] %(levelname)s: %(message)s",
     handlers=[logging.StreamHandler()]
 )
+logger = logging.getLogger(__name__)
+
+# PAT is optional - if empty or "anonymous", will use public access
+if not PAT:
+    logger.warning("⚠️ PAT not provided - using anonymous access (only works for public Confluence)")
 
 # MongoDB connection
 client = MongoClient(MONGO_URI)
@@ -29,25 +50,67 @@ db = client[MONGO_DB]
 col = db["pages"]
 col.create_index("page_id", unique=True)
 
-# HTTP session - MODIFIED to support public Confluence
-# Original code (commented for reference):
-# session = requests.Session()
-# session.headers.update({
-#     "Accept": "application/json",
-#     "Authorization": f"Bearer {PAT}"
-# })
-
-# NEW: Support both authenticated and anonymous (public) Confluence access
+# HTTP session - supports both authenticated and anonymous access
 session = requests.Session()
 if PAT and PAT.lower() != "anonymous":
-    # Authenticated access (for private Confluence)
     session.headers.update({
         "Accept": "application/json",
         "Authorization": f"Bearer {PAT}"
     })
 else:
-    # Anonymous access (for public Confluence like Apache's cwiki)
     session.headers.update({"Accept": "application/json"})
+
+
+# ---------- Checkpoint Management ----------
+
+CHECKPOINT_FILE = Path(__file__).parent / ".crawl_checkpoint.json"
+
+
+def save_checkpoint(seen: set, queue: list, page_counter: int):
+    """Save crawl progress to checkpoint file."""
+    checkpoint = {
+        "seen": list(seen),
+        "queue": list(queue),
+        "page_counter": page_counter,
+        "timestamp": datetime.utcnow().isoformat(),
+        "space_key": SPACE
+    }
+    with open(CHECKPOINT_FILE, "w") as f:
+        json.dump(checkpoint, f)
+    logger.debug(f"Checkpoint saved: {page_counter} pages processed")
+
+
+def load_checkpoint() -> tuple[set, deque, int] | None:
+    """Load checkpoint if exists and matches current space."""
+    if not CHECKPOINT_FILE.exists():
+        return None
+    
+    try:
+        with open(CHECKPOINT_FILE, "r") as f:
+            checkpoint = json.load(f)
+        
+        # Only use checkpoint if same space
+        if checkpoint.get("space_key") != SPACE:
+            logger.info("Checkpoint is for different space, starting fresh")
+            return None
+        
+        seen = set(checkpoint.get("seen", []))
+        queue = deque(checkpoint.get("queue", []))
+        page_counter = checkpoint.get("page_counter", 0)
+        
+        logger.info(f"📂 Resuming from checkpoint: {page_counter} pages already processed, {len(queue)} in queue")
+        return seen, queue, page_counter
+        
+    except (json.JSONDecodeError, KeyError) as e:
+        logger.warning(f"Invalid checkpoint file, starting fresh: {e}")
+        return None
+
+
+def clear_checkpoint():
+    """Remove checkpoint file after successful completion."""
+    if CHECKPOINT_FILE.exists():
+        CHECKPOINT_FILE.unlink()
+        logger.info("Checkpoint cleared")
 
 
 # ---------- Helpers: robust request ----------
@@ -59,19 +122,19 @@ def safe_request(url, tries=4, backoff=1.5):
             r = session.get(url, timeout=40)
             if r.status_code in (429, 502, 503, 504):
                 wait = backoff * (i + 1)
-                logging.warning(f"{r.status_code} on {url}, retrying in {wait:.1f}s")
+                logger.warning(f"{r.status_code} on {url}, retrying in {wait:.1f}s")
                 time.sleep(wait)
                 continue
             if r.ok:
                 return r
         except requests.RequestException as e:
-            logging.warning(f"Error {e}, retry {i + 1}")
+            logger.warning(f"Error {e}, retry {i + 1}")
             time.sleep(backoff * (i + 1))
-    logging.error(f"❌ Failed to fetch {url}")
+    logger.error(f"❌ Failed to fetch {url}")
     return None
 
 
-# ---------- NEW: Table-preserving extraction ----------
+# ---------- Table-preserving extraction ----------
 
 def _html_table_to_json_fast(table_tag):
     """Extract table rows with minimal overhead."""
@@ -86,8 +149,6 @@ def _html_table_to_json_fast(table_tag):
 def extract_content_with_tables_fast(html_str: str):
     """
     Returns a list of blocks: {"type": "text"|"header"|"table", "data": ...}
-    - Preserves tables structurally (list of rows)
-    - Uses lxml parser for speed
     """
     soup = BeautifulSoup(html_str or "", "lxml")
     for tag in soup(["style", "script"]):
@@ -114,19 +175,29 @@ def extract_content_with_tables_fast(html_str: str):
 
 
 def blocks_to_plaintext_for_embedding(blocks):
-    """
-    Convert blocks to readable text for embeddings.
-    Tables become pipe-separated rows.
-    """
+    """Convert blocks to readable text for embeddings with proper markdown tables."""
     lines = []
-    append = lines.append
     for b in blocks or []:
         typ = b.get("type")
         if typ in ("text", "header"):
-            append(b.get("data", ""))
+            lines.append(b.get("data", ""))
         elif typ == "table":
-            append("\n".join(" | ".join(row) for row in b.get("data", [])))
-    return "\n".join(lines).strip()
+            table_data = b.get("data", [])
+            if table_data:
+                # Convert to proper markdown table format
+                md_rows = []
+                for i, row in enumerate(table_data):
+                    # Escape pipe characters in cell content
+                    escaped_row = [cell.replace("|", "\\|") for cell in row]
+                    md_rows.append("| " + " | ".join(escaped_row) + " |")
+                    
+                    # Add separator after header row (first row)
+                    if i == 0:
+                        separator = "| " + " | ".join(["---"] * len(row)) + " |"
+                        md_rows.append(separator)
+                
+                lines.append("\n".join(md_rows))
+    return "\n\n".join(lines).strip()
 
 
 # ---------- Links & IDs ----------
@@ -173,79 +244,162 @@ def get_children(pid):
         nxt = f"{BASE}{nxt_link}" if nxt_link else None
 
 
-def crawl(max_pages: int = 2000):
-    """Crawl Confluence → store table-aware blocks + clean text"""
+def should_sync_page(pid: str, remote_version: int) -> bool:
+    """
+    Check if page needs syncing (incremental sync).
+    Returns True if page is new or has been updated.
+    """
+    if not settings.enable_incremental_sync:
+        return True  # Always sync if incremental disabled
+    
+    existing = col.find_one({"page_id": pid}, {"version": 1})
+    if not existing:
+        return True  # New page
+    
+    local_version = existing.get("version", 0)
+    return remote_version > local_version
+
+
+def crawl(max_pages: int = None, resume: bool = True):
+    """
+    Crawl Confluence → store table-aware blocks + clean text
+    
+    Args:
+        max_pages: Maximum pages to crawl (default from settings)
+        resume: Whether to resume from checkpoint if available
+    """
+    max_pages = max_pages or settings.max_pages_to_crawl
+    crawl_delay = settings.crawl_delay_seconds
+    
     start_time = datetime.utcnow()
-    home_id = get_homepage_id()
-    queue = deque([home_id])
-    seen = set()
-    page_counter = 0
+    
+    # Try to resume from checkpoint
+    checkpoint_data = load_checkpoint() if resume else None
+    
+    if checkpoint_data:
+        seen, queue, page_counter = checkpoint_data
+    else:
+        home_id = get_homepage_id()
+        queue = deque([home_id])
+        seen = set()
+        page_counter = 0
+        logger.info(f"🌐 Starting fresh crawl from homepage {home_id} in space {SPACE}")
+    
+    synced_count = 0
+    skipped_count = 0
+    
+    try:
+        while queue and page_counter < max_pages:
+            pid = queue.popleft()
+            if pid in seen:
+                continue
+            seen.add(pid)
+            page_counter += 1
 
-    logging.info(f"🌐 Starting crawl from homepage {home_id} in space {SPACE}")
+            # Enhanced API call with ancestors, labels, and history (for author)
+            page_url = f"{BASE}/rest/api/content/{pid}?expand=body.storage,version,ancestors,metadata.labels,history"
+            r = safe_request(page_url)
+            if not r or not r.ok:
+                continue
 
-    # while queue:
-    #     pid = queue.popleft()
-    #     if pid in seen:
-    #         continue
-    #     seen.add(pid)
+            j = r.json()
+            title = j.get("title", f"Untitled-{pid}")
+            version = j.get("version", {}).get("number", 1)
+            
+            # Incremental sync check
+            if not should_sync_page(pid, version):
+                skipped_count += 1
+                logger.debug(f"⏭️ Skipped (unchanged): {title}")
+                # Still need to process children even if page unchanged
+                try:
+                    for ch in get_children(pid):
+                        if ch["id"] not in seen:
+                            queue.append(ch["id"])
+                except Exception:
+                    pass
+                continue
+            
+            body_html = j.get("body", {}).get("storage", {}).get("value", "")
+            last_updated = j.get("version", {}).get("when")
 
-    while queue and page_counter < max_pages:
-        pid = queue.popleft()
-        if pid in seen:
-            continue
-        seen.add(pid)
-        page_counter += 1
+            # Extract page hierarchy (ancestors)
+            ancestors = j.get("ancestors", [])
+            parent_page_id = ancestors[-1]["id"] if ancestors else None
+            breadcrumb = [{"id": a["id"], "title": a["title"]} for a in ancestors]
+            
+            # Extract labels/tags
+            labels_data = j.get("metadata", {}).get("labels", {}).get("results", [])
+            labels = [lbl["name"] for lbl in labels_data]
+            
+            # Extract author info
+            author = j.get("history", {}).get("createdBy", {}).get("displayName", "Unknown")
+            author_email = j.get("history", {}).get("createdBy", {}).get("email")
 
-        page_url = f"{BASE}/rest/api/content/{pid}?expand=body.storage,version"
-        r = safe_request(page_url)
-        if not r or not r.ok:
-            continue
+            # Table-aware blocks + clean text
+            content_blocks = extract_content_with_tables_fast(body_html)
+            content_text = blocks_to_plaintext_for_embedding(content_blocks)
 
-        j = r.json()
-        title = j.get("title", f"Untitled-{pid}")
-        body_html = j.get("body", {}).get("storage", {}).get("value", "")
-        version = j.get("version", {}).get("number", 1)
-        last_updated = j.get("version", {}).get("when")
+            page_doc = {
+                "page_id": pid,
+                "space_key": SPACE,
+                "title": title,
+                "status": "current",
+                "url": f"{BASE}/spaces/{SPACE}/pages/{pid}/{title.replace(' ', '+')}",
+                "last_updated": last_updated,
+                "version": version,
+                # NEW: Page hierarchy
+                "parent_page_id": parent_page_id,
+                "breadcrumb": breadcrumb,
+                # NEW: Labels/tags
+                "labels": labels,
+                # NEW: Author info
+                "author": author,
+                "author_email": author_email,
+                # Content
+                "content_html": body_html,
+                "content_blocks": content_blocks,
+                "content_text": content_text,
+                "synced_at": datetime.utcnow().isoformat()
+            }
 
-        # NEW: table-aware blocks + clean text
-        content_blocks = extract_content_with_tables_fast(body_html)
-        content_text = blocks_to_plaintext_for_embedding(content_blocks)
+            col.update_one({"page_id": pid}, {"$set": page_doc}, upsert=True)
+            synced_count += 1
+            logger.info(f"✅ Synced: {title}")
 
-        page_doc = {
-            "page_id": pid,
-            "space_key": SPACE,
-            "title": title,
-            "status": "current",
-            "url": f"{BASE}/spaces/{SPACE}/pages/{pid}/{title.replace(' ', '+')}",
-            "last_updated": last_updated,
-            "version": version,
-            "content_html": body_html,
-            "content_blocks": content_blocks,  # <— structured (tables preserved)
-            "content_text": content_text,  # <— used for embeddings
-            "synced_at": datetime.utcnow().isoformat()
-        }
+            # Enqueue children
+            try:
+                for ch in get_children(pid):
+                    if ch["id"] not in seen:
+                        queue.append(ch["id"])
+            except Exception as e:
+                logger.warning(f"Child fetch failed for {pid}: {e}")
 
-        col.update_one({"page_id": pid}, {"$set": page_doc}, upsert=True)
-        logging.info(f"✅ Synced: {title}")
+            # Follow hyperlinks inside body
+            for l in extract_links(body_html):
+                cid = url_to_id(l)
+                if cid and cid not in seen:
+                    queue.append(cid)
 
-        # Enqueue children
-        try:
-            for ch in get_children(pid):
-                if ch["id"] not in seen:
-                    queue.append(ch["id"])
-        except Exception as e:
-            logging.warning(f"Child fetch failed for {pid}: {e}")
-
-        # Follow hyperlinks inside body
-        for l in extract_links(body_html):
-            cid = url_to_id(l)
-            if cid and cid not in seen:
-                queue.append(cid)
-
-        time.sleep(0.1)
-
-    logging.info(f"🧭 Crawl complete. {len(seen)} pages processed.")
-    logging.info(f"🕒 Started: {start_time} | Finished: {datetime.utcnow()}")
+            time.sleep(crawl_delay)
+            
+            # Save checkpoint every 50 pages
+            if page_counter % 50 == 0:
+                save_checkpoint(seen, list(queue), page_counter)
+    
+    except KeyboardInterrupt:
+        logger.info("\n⚠️ Crawl interrupted by user")
+        save_checkpoint(seen, list(queue), page_counter)
+        logger.info(f"💾 Progress saved. Resume with: python -m ingestion.confluence_crawler")
+        raise
+    
+    # Clear checkpoint on successful completion
+    clear_checkpoint()
+    
+    logger.info(f"🧭 Crawl complete!")
+    logger.info(f"   📄 Pages processed: {page_counter}")
+    logger.info(f"   ✅ Synced: {synced_count}")
+    logger.info(f"   ⏭️ Skipped (unchanged): {skipped_count}")
+    logger.info(f"🕒 Started: {start_time} | Finished: {datetime.utcnow()}")
 
 
 if __name__ == "__main__":
